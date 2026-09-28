@@ -1,12 +1,23 @@
 # Atlas-free registration
 
-Headless Linux wrapper of atlas-free slice alignment. Jenkins runs the image with job environment variables.
+Headless Linux wrapper of the v03 atlas-free slice alignment pipeline from `atlas_free_alignment_v03.ipynb`. Jenkins runs the image with job environment variables.
 
-Supported slice formats: PNG, TIFF (`.tif`, `.tiff`), JPEG 2000 (`.jp2`). Images are loaded with Pillow, converted to RGB, and scaled to 0–1, including 16-bit TIFF/JP2.
+The algorithm is coarse-to-fine **rigid** alignment plus atlas estimation (`atlas_free_alignment.py`). Slice order follows the integer at the end of the filename (`..._001.tif`, `..._002.tif`). Missing numbers are filled with blank slices so z spacing matches slice number.
+
+Supported formats: PNG, TIFF, JPEG 2000.
 
 ## Image
 
-Default build is CPU torch. If the Jenkins agent has CUDA, build the CUDA wheels instead and pass the GPU in at run time.
+CPU image (v03) is on GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/mitralab-organization/atlas-free-registration:cpu
+docker pull ghcr.io/mitralab-organization/atlas-free-registration:latest
+```
+
+Until the GitHub repo and package are public, you need `docker login ghcr.io` with a GitHub account that can read the package.
+
+Build locally:
 
 ```bash
 docker build --platform linux/amd64 -t atlas-free-registration:cpu .
@@ -16,13 +27,7 @@ docker build --platform linux/amd64 \
   -t atlas-free-registration:cuda .
 ```
 
-`DEVICE` defaults to `auto`: CUDA if that torch build can see a GPU, otherwise CPU. The CPU image cannot use a host GPU.
-
-If Jenkins already has a CUDA torch environment, skip the image and run `src/slice_alignment.py` in that env.
-
 ## Jenkins run
-
-CPU:
 
 ```bash
 docker run --rm \
@@ -47,12 +52,16 @@ docker run --rm --gpus all \
 
 | Env | Meaning |
 |---|---|
-| `OUTDIR` or `OUTPUT_DIR` | Output directory inside the container |
-| `INPUT_DIR` | Directory of png/tif/tiff/jp2 slices |
-| `FNAMES` | Space-separated file list, if not using `INPUT_DIR` |
-| `DEVICE` | `auto` (default), `cpu`, or `cuda` |
-| `REMOVE_ARTIFACTS` | `1`/`true` to mask near-white rows/columns |
-| `SAVE_ALL_FIGS` | `1`/`true` to write diagnostic PNGs |
-| `NITER_BIG_LOOP` | Default `400` |
+| `OUTDIR` | Output directory |
+| `INPUT_DIR` | Directory of slices |
+| `DEVICE` | `auto`, `cpu`, or `cuda` |
+| `DX` | In-plane pixel size before `--ndown` (default `14.72`) |
+| `DZ` | Spacing between consecutive slice numbers (default `40`) |
+| `NDOWN` | Load-time in-plane downsample `2**NDOWN` (default `2`) |
+| `NITER0` `NITER1` `NITER2` `NITER3` | Coarse-to-fine iterations (default 2000, 1000, 500, 200) |
+| `NITER_ATLAS` | Atlas updates per iteration (default `5`) |
+| `SAVE_ALL_FIGS` | `1` to write diagnostic PNGs |
 
-Outputs in `OUTDIR`: `A.npz`, `v.npz`, `Esave.npz`, `RphiI.npz`, `phiiRiJ.npz`, `Wshow.npz`, `W_robust_loss.npz`.
+Set an `NITER*` value to `0` to skip that level. Smoke test: `NITER0=1 NITER1=0 NITER2=0 NITER3=0`.
+
+Outputs: `R.npy`, `v03_rigid_*.npy`, `atlas.nii.gz`, `I.npz`.
