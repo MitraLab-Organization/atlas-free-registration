@@ -8,14 +8,15 @@ Supported formats: PNG, TIFF, JPEG 2000.
 
 ## Image
 
-CPU image (v03) is on GitHub Container Registry:
+Images are on GitHub Container Registry:
 
 ```bash
 docker pull ghcr.io/mitralab-organization/atlas-free-registration:cpu
+docker pull ghcr.io/mitralab-organization/atlas-free-registration:cuda
 docker pull ghcr.io/mitralab-organization/atlas-free-registration:latest
 ```
 
-Until the GitHub repo and package are public, you need `docker login ghcr.io` with a GitHub account that can read the package.
+`:latest` is the CPU image. Anonymous pull works only after the GitHub package (and linked repo) are public; until then use `docker login ghcr.io`.
 
 Build locally:
 
