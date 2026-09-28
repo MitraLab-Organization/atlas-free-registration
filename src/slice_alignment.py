@@ -42,6 +42,9 @@ def _env_list(*names):
     if value is None:
         return None
     return value.split()
+
+
+class _NullDisplay:
     def update(self, *args, **kwargs):
         pass
 
@@ -51,6 +54,27 @@ try:
 except ImportError:
     def display(*args, **kwargs):
         return _NullDisplay()
+
+
+def resolve_device(value):
+    requested = str(value or "auto").strip().lower()
+    if requested in {"auto", ""}:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = requested
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise SystemExit(
+            f"DEVICE={device} but this PyTorch build cannot see a GPU. "
+            "Build with TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124 and run with --gpus all, "
+            "or run inside an environment that already has CUDA torch."
+        )
+    return device
+
+
+def to_cpu(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu()
+    return value
 
 
 def resolve_dtype(value):
@@ -114,6 +138,12 @@ def load_slice(path):
 
 def save_figure(outdir, name, plot_fn):
     fig, ax = plt.subplots()
+    original_imshow = ax.imshow
+
+    def imshow(img, *args, **kwargs):
+        return original_imshow(to_cpu(img), *args, **kwargs)
+
+    ax.imshow = imshow
     plot_fn(ax)
     fig.savefig(os.path.join(outdir, name))
     plt.close(fig)
@@ -216,7 +246,7 @@ def main():
     parser.add_argument("-sigmaM", default=1.0, type=float, help="Default - 1; A scalar used during registration")
     parser.add_argument("-sigmaR", default=500.0, type=float, help="Default - 500; A scalar used during registration")
     parser.add_argument("-a_reg", default=6.0, type=float, help="Default - 6; A scalar used during registration")
-    parser.add_argument("-device", default=_first_env("DEVICE", "AFR_DEVICE", default="cpu"), help="Default - cpu; The device where PyTorch computations should occur during registration")
+    parser.add_argument("-device", default=_first_env("DEVICE", "AFR_DEVICE", default="auto"), help="Default - auto (cuda if available, else cpu)")
     parser.add_argument("-dtype", default=_first_env("DTYPE", "AFR_DTYPE", default="float"), help="Default - float (float64); The dtype to be used during PyTorch computation")
     parser.add_argument("--enable_deformation", action="store_true", help="TODO: NOT CURRENTLY SUPPORTED")
     parser.add_argument("--remove_artifacts", action="store_true", help="Remove rows or columns containing exclusively 1s. This type of artifact is common in certain use cases.")
@@ -246,7 +276,7 @@ def main():
     sigmaM = args.sigmaM
     sigmaR = args.sigmaR
     a_reg = args.a_reg
-    device = args.device
+    device = resolve_device(args.device)
     dtype = resolve_dtype(args.dtype)
     enable_deformation = args.enable_deformation
     remove_artifacts = args.remove_artifacts or _env_flag("REMOVE_ARTIFACTS", "AFR_REMOVE_ARTIFACTS")
@@ -309,7 +339,7 @@ def main():
     xJ = [torch.tensor(x, dtype=dtype, device=device) for x in xJ]
 
     XJ = torch.stack(torch.meshgrid(xJ, indexing="ij"), -1)
-    A = torch.eye(3)
+    A = torch.eye(3, dtype=dtype, device=device)
     A = A[None].repeat(nJ[0], 1, 1)
     A = A2DtoA3D(A)
     Ai = torch.linalg.inv(A)
@@ -344,7 +374,7 @@ def main():
     XV = torch.stack(torch.meshgrid(*xv, indexing="ij"), -1)
     XV2d = XV[..., 1:]
     v2d = torch.zeros_like(XV2d)
-    v2d = torch.randn(v2d.shape, dtype=v2d.dtype)
+    v2d = torch.randn(v2d.shape, dtype=v2d.dtype, device=v2d.device)
 
     L = L_from_xv_a_p(xv, a, p)
     LL = L**2
@@ -379,7 +409,7 @@ def main():
         save_figure(outdir, "fig9.png", lambda ax: ax.imshow(phiI[:, AJ.shape[1] // 2].permute(1, 2, 0)))
         save_figure(outdir, "fig10.png", lambda ax: ax.imshow(phiI[:, :, phiI.shape[2] // 2].permute(1, 2, 0), aspect="auto"))
 
-    A_temp = torch.eye(3)[None].repeat(J.shape[1], 1, 1)
+    A_temp = torch.eye(3, dtype=dtype, device=device)[None].repeat(J.shape[1], 1, 1)
     v_temp = torch.zeros_like(v)
     Anew, vnew, Eregistration, Ereg = weighted_see_registration(
         xI, I, xJ, J, W, xv, v_temp, A_temp, a, p, sigmaM=1.0, sigmaR=1e5, niter=10, epT=1e-2, epL=1e-6, epv=1e1, draw=draw_every
@@ -438,16 +468,18 @@ def main():
         hfig_at = hfig_at_estimate = hfig_reg = hfig_E = None
 
     bigger = 20
-    x2dI = [torch.arange(n + bigger, dtype=dtype) * down - (n + bigger - 1) * down / 2 for n in nJ[1:]]
-    xI = [torch.arange(nJ[0], dtype=dtype) - (nJ[0] - 1) / 2, x2dI[0], x2dI[1]]
+    x2dI = [torch.arange(n + bigger, dtype=dtype, device=device) * down - (n + bigger - 1) * down / 2 for n in nJ[1:]]
+    xI = [torch.arange(nJ[0], dtype=dtype, device=device) - (nJ[0] - 1) / 2, x2dI[0], x2dI[1]]
     XI = torch.stack(torch.meshgrid(xI, indexing="ij"), -1)
 
     Esave = []
     v = torch.zeros_like(v)
-    A = torch.eye(3)
+    A = torch.eye(3, dtype=dtype, device=device)
     A = A[None].repeat(nJ[0], 1, 1)
 
-    I = torch.zeros((J.shape[0], XI.shape[0], XI.shape[1], XI.shape[2])) + (torch.sum(J * W, dim=(1, 2, 3)) / torch.sum(W, dim=(0, 1, 2)))[..., None, None, None]
+    I = torch.zeros((J.shape[0], XI.shape[0], XI.shape[1], XI.shape[2]), dtype=dtype, device=device) + (
+        torch.sum(J * W, dim=(1, 2, 3)) / torch.sum(W, dim=(0, 1, 2))
+    )[..., None, None, None]
     RphiI = transform_image(xI, I, xv, v, A, xJ)
     rloss, W_robust_loss = robust_loss(RphiI, xJ, J, W, c, return_weights=True)
 
@@ -484,17 +516,17 @@ def main():
 
         if saveAllFigs:
             ax_at[0].cla()
-            ax_at[0].imshow(I[:, I.shape[1] // 2].permute(1, 2, 0))
+            ax_at[0].imshow(to_cpu(I[:, I.shape[1] // 2].permute(1, 2, 0)))
             ax_at[1].cla()
-            ax_at[1].imshow(I[:, :, I.shape[2] // 2].permute(1, 2, 0), aspect="auto", interpolation="none")
+            ax_at[1].imshow(to_cpu(I[:, :, I.shape[2] // 2].permute(1, 2, 0)), aspect="auto", interpolation="none")
             ax_at[2].cla()
-            ax_at[2].imshow(I[:, :, :, I.shape[3] // 2].permute(1, 2, 0), aspect="auto", interpolation="none")
+            ax_at[2].imshow(to_cpu(I[:, :, :, I.shape[3] // 2].permute(1, 2, 0)), aspect="auto", interpolation="none")
             ax_at[3].cla()
-            ax_at[3].imshow(Wshow[I.shape[1] // 2])
+            ax_at[3].imshow(to_cpu(Wshow[I.shape[1] // 2]))
             ax_at[4].cla()
-            ax_at[4].imshow(Wshow[:, I.shape[2] // 2], aspect="auto", interpolation="none")
+            ax_at[4].imshow(to_cpu(Wshow[:, I.shape[2] // 2]), aspect="auto", interpolation="none")
             ax_at[5].cla()
-            ax_at[5].imshow(Wshow[:, :, I.shape[3] // 2], aspect="auto", interpolation="none")
+            ax_at[5].imshow(to_cpu(Wshow[:, :, I.shape[3] // 2]), aspect="auto", interpolation="none")
 
         Esave.append([rloss.item() + Ereg + ERat, rloss.item(), Ereg, ERat])
         if saveAllFigs:
@@ -510,13 +542,13 @@ def main():
             flush=True,
         )
 
-    np.savez(os.path.join(outdir, "A.npz"), data=A)
-    np.savez(os.path.join(outdir, "v.npz"), data=v)
+    np.savez(os.path.join(outdir, "A.npz"), data=to_cpu(A))
+    np.savez(os.path.join(outdir, "v.npz"), data=to_cpu(v))
     np.savez(os.path.join(outdir, "Esave.npz"), data=Esave)
-    np.savez(os.path.join(outdir, "RphiI.npz"), data=RphiI)
-    np.savez(os.path.join(outdir, "phiiRiJ.npz"), data=phiiRiJ)
-    np.savez(os.path.join(outdir, "Wshow.npz"), data=Wshow)
-    np.savez(os.path.join(outdir, "W_robust_loss.npz"), data=W_robust_loss)
+    np.savez(os.path.join(outdir, "RphiI.npz"), data=to_cpu(RphiI))
+    np.savez(os.path.join(outdir, "phiiRiJ.npz"), data=to_cpu(phiiRiJ))
+    np.savez(os.path.join(outdir, "Wshow.npz"), data=to_cpu(Wshow))
+    np.savez(os.path.join(outdir, "W_robust_loss.npz"), data=to_cpu(W_robust_loss))
     plt.close("all")
     print(f"Wrote outputs to {outdir}", flush=True)
 
